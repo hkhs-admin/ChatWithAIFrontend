@@ -16,7 +16,9 @@
 
     <div v-if="aiResponse" class="response-section">
       <p class="ai-text">{{ aiResponse }}</p>
-      <audio ref="audioPlayer" :src="audioUrl" controls autoplay @ended="onAudioEnded"></audio>
+      <button @click="speakResponse" :disabled="!aiResponse || isSpeaking" class="speak-button">
+        {{ isSpeaking ? '播放中...' : '再次播放語音' }}
+      </button>
     </div>
 
     <div v-if="error" class="error-message">
@@ -31,7 +33,7 @@
 </template>
 
 <script>
-import axios from 'axios'; // 引入 axios 用於發送 HTTP 請求
+import axios from 'axios';
 
 export default {
   name: 'AIAssistant',
@@ -39,80 +41,138 @@ export default {
     return {
       userPrompt: '',
       aiResponse: '',
-      audioUrl: '',
-      currentAnimationId: 'idle', // 初始動畫狀態
-      isLoading: false, // 控制按鈕和輸入框的禁用狀態
-      error: null, // 用於顯示錯誤信息
-      backendUrl: 'http://localhost:3001/api/interact-with-gemini', // 你的後端 API URL
+      // audioUrl: '', // 不再需要這個
+      currentAnimationId: 'idle',
+      isLoading: false,
+      error: null,
+      backendUrl: 'http://localhost:3001/api/interact-with-gemini',
+      isSpeaking: false, // 新增：控制語音播放狀態
+      synth: null, // Web Speech API 的 SpeechSynthesisUterrance 實例
+      voice: null, // 選定的語音
     };
   },
+  mounted() {
+    // 在組件掛載時初始化 Web Speech API
+    if ('speechSynthesis' in window) {
+      this.synth = window.speechSynthesis;
+      this.loadVoices();
+      // 在語音列表載入後選擇一個語音
+      this.synth.onvoiceschanged = () => {
+        this.loadVoices();
+      };
+    } else {
+      console.warn('您的瀏覽器不支持 Web Speech API。');
+    }
+  },
   methods: {
+    loadVoices() {
+      const voices = this.synth.getVoices();
+      // 嘗試找到一個中文（台灣）的語音
+      // 你可以根據需要調整語言代碼和語音名稱
+      this.voice = voices.find(
+        voice => voice.lang === 'zh-TW' && voice.name.includes('Google') || voice.lang === 'zh-TW'
+      ) || voices.find(voice => voice.lang.startsWith('en')) || voices[0]; // 退而求其次找英文或第一個
+      
+      if (!this.voice) {
+        console.warn('未找到合適的語音，可能語音列表尚未完全載入或瀏覽器無支持語音。');
+      }
+    },
     async sendMessage() {
       if (!this.userPrompt.trim()) {
         alert('請輸入內容！');
         return;
       }
 
-      this.isLoading = true; // 開始發送請求，設置加載狀態
-      this.error = null; // 清除之前的錯誤
-      this.aiResponse = ''; // 清除之前的 AI 回應
-      this.audioUrl = ''; // 清除之前的音訊 URL
+      this.isLoading = true;
+      this.error = null;
+      this.aiResponse = '';
+      this.stopSpeaking(); // 發送新訊息前停止當前語音
 
-      // 向父組件發送一個事件，通知動畫ID更新為 'listening'
       this.$emit('update-animation', 'listening');
 
       try {
         const response = await axios.post(this.backendUrl, {
           prompt: this.userPrompt,
-          language: 'zh-TW', // 你可以根據需要傳遞語言
         });
 
         const data = response.data;
         this.aiResponse = data.text;
-        this.audioUrl = data.audioUrl;
         this.currentAnimationId = data.animationId;
 
-        // 向父組件發送一個事件，通知動畫ID更新為模型回應後的動畫
         this.$emit('update-animation', data.animationId);
 
-        // 清空輸入框
         this.userPrompt = '';
 
-        // 等待音訊播放結束或處理其他邏輯
-        this.$nextTick(() => {
-          if (this.$refs.audioPlayer && this.audioUrl) {
-            this.$refs.audioPlayer.play().catch(e => {
-              console.error("音訊播放失敗:", e);
-              // 如果自動播放失敗，通常是因為瀏覽器的限制，或音訊URL有誤
-              // 你可以提示用戶手動點擊播放按鈕
-            });
-          }
-        });
+        // 收到 AI 回應後，立即播放語音
+        this.speakResponse();
 
       } catch (error) {
         console.error('從後端獲取回應時出錯:', error);
         this.error = error.response ? error.response.data.error || error.response.data.details || JSON.stringify(error.response.data) : error.message;
 
-        // 如果出錯，將動畫ID設置為 'error' 或 'idle'
-        this.$emit('update-animation', 'error'); // 假設有一個 'error' 動畫
+        this.$emit('update-animation', 'error');
       } finally {
-        this.isLoading = false; // 請求結束，取消加載狀態
+        this.isLoading = false;
       }
     },
-    onAudioEnded() {
-      console.log('音訊播放結束');
-      // 音訊播放結束後，將動畫ID設置回 'idle'
-      this.$emit('update-animation', 'idle');
-    }
+    speakResponse() {
+      if (!this.aiResponse || !this.synth) {
+        console.warn('沒有文本或語音合成器不可用。');
+        return;
+      }
+
+      this.stopSpeaking(); // 確保每次只播放一個語音
+
+      const utterance = new SpeechSynthesisUtterance(this.aiResponse);
+
+      if (this.voice) {
+        utterance.voice = this.voice;
+      } else {
+        // 如果沒有找到特定語音，可以使用預設語音
+        utterance.lang = 'en-US'; // 預設英文
+        console.warn('使用預設語音 (en-US)。');
+      }
+      
+      utterance.pitch = 1; // 音高 (0 to 2)
+      utterance.rate = 1;  // 語速 (0.1 to 10)
+      utterance.volume = 1; // 音量 (0 to 1)
+
+      utterance.onstart = () => {
+        this.isSpeaking = true;
+        this.$emit('update-animation', 'speaking'); // 語音播放時觸發 'speaking' 動畫
+      };
+
+      utterance.onend = () => {
+        this.isSpeaking = false;
+        this.$emit('update-animation', 'idle'); // 語音播放結束時觸發 'idle' 動畫
+      };
+
+      utterance.onerror = (event) => {
+        console.error('語音播放錯誤:', event.error);
+        this.isSpeaking = false;
+        this.$emit('update-animation', 'error');
+      };
+
+      this.synth.speak(utterance);
+    },
+    stopSpeaking() {
+      if (this.synth && this.synth.speaking) {
+        this.synth.cancel(); // 停止當前正在播放的語音
+        this.isSpeaking = false;
+        this.$emit('update-animation', 'idle');
+      }
+    },
+    // onAudioEnded() 方法不再需要
   },
-  watch: {
-    // 這裡AIAssistant是發送動畫ID給App.vue，所以此處不需要watch
-    // 如果未來AIAssistant要接收App.vue的動畫控制，則需要這個watch
+  beforeUnmount() {
+    // 組件銷毀前停止任何正在播放的語音
+    this.stopSpeaking();
   }
 };
 </script>
 
 <style scoped>
+/* 樣式基本保持不變，新增 .speak-button 樣式 */
 .ai-assistant {
   display: flex;
   flex-direction: column;
@@ -136,7 +196,7 @@ h1 {
   display: flex;
   width: 100%;
   margin-bottom: 20px;
-  gap: 10px; /* 增加間距 */
+  gap: 10px;
 }
 
 .prompt-input {
@@ -185,23 +245,46 @@ h1 {
   padding: 15px;
   border-radius: 8px;
   text-align: left;
-  min-height: 80px; /* 最小高度 */
+  min-height: 80px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  gap: 10px; /* 新增間距 */
 }
 
 .ai-text {
   color: #495057;
   font-size: 1.1em;
   line-height: 1.6;
-  white-space: pre-wrap; /* 保持換行符 */
+  white-space: pre-wrap;
 }
 
-audio {
+/* 移除 audio 標籤的樣式，因為不再使用 */
+/* audio {
   width: 100%;
   margin-top: 15px;
+} */
+
+.speak-button {
+  padding: 8px 15px;
+  background-color: #28a745; /* 綠色按鈕 */
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: background-color 0.3s ease;
 }
+
+.speak-button:hover:not(:disabled) {
+  background-color: #218838;
+}
+
+.speak-button:disabled {
+  background-color: #90ee90; /* 淺綠色禁用狀態 */
+  cursor: not-allowed;
+}
+
 
 .error-message {
   color: #dc3545;
