@@ -41,42 +41,88 @@ export default {
     return {
       userPrompt: '',
       aiResponse: '',
-      // audioUrl: '', // 不再需要這個
       currentAnimationId: 'idle',
       isLoading: false,
       error: null,
       backendUrl: 'http://localhost:3001/api/interact-with-gemini',
-      isSpeaking: false, // 新增：控制語音播放狀態
-      synth: null, // Web Speech API 的 SpeechSynthesisUterrance 實例
-      voice: null, // 選定的語音
+      isSpeaking: false,
+      synth: null,
+      voice: null,
+      selectedVoiceGender: 'female', // 新增：預設選擇女性語音 ('male', 'female', 'neutral', 'any')
+      availableVoices: [], // 新增：儲存所有可用的語音列表
     };
   },
   mounted() {
-    // 在組件掛載時初始化 Web Speech API
     if ('speechSynthesis' in window) {
       this.synth = window.speechSynthesis;
-      this.loadVoices();
-      // 在語音列表載入後選擇一個語音
+      // 確保在語音列表載入後才嘗試選擇語音
       this.synth.onvoiceschanged = () => {
         this.loadVoices();
       };
+      // 如果語音已經載入，直接呼叫一次
+      if (this.synth.getVoices().length > 0) {
+        this.loadVoices();
+      }
     } else {
       console.warn('您的瀏覽器不支持 Web Speech API。');
+      this.error = '您的瀏覽器不支持語音合成功能。';
     }
   },
   methods: {
     loadVoices() {
       const voices = this.synth.getVoices();
-      // 嘗試找到一個中文（台灣）的語音
-      // 你可以根據需要調整語言代碼和語音名稱
-      this.voice = voices.find(
-        voice => voice.lang === 'zh-TW' && voice.name.includes('Google') || voice.lang === 'zh-TW'
-      ) || voices.find(voice => voice.lang.startsWith('en')) || voices[0]; // 退而求其次找英文或第一個
+      this.availableVoices = voices; // 將所有語音存入 data
+      this.selectVoice(); // 呼叫新的選擇語音方法
+    },
+
+    selectVoice() {
+      if (!this.availableVoices.length) {
+        console.warn('語音列表為空，無法選擇語音。');
+        this.voice = null;
+        return;
+      }
+
+      let targetVoice = null;
+      const targetLang = 'zh-TW'; // 優先選擇繁體中文
+
+      // 篩選出目標語言的語音
+      const langVoices = this.availableVoices.filter(v => v.lang === targetLang);
       
-      if (!this.voice) {
+      // 依據 selectedVoiceGender 選擇語音
+      if (this.selectedVoiceGender === 'female') {
+        // 嘗試找 Google 繁體中文女性語音，或任何繁體中文女性語音
+        targetVoice = langVoices.find(v => v.name.includes('Google') && (v.name.includes('Female') || v.name.includes('zh-TW-Wavenet-A'))) ||
+                      langVoices.find(v => v.name.includes('Female') || v.name.includes('女聲'));
+      } else if (this.selectedVoiceGender === 'male') {
+        // 嘗試找 Google 繁體中文男性語音，或任何繁體中文男性語音
+        targetVoice = langVoices.find(v => v.name.includes('Google') && (v.name.includes('Male') || v.name.includes('zh-TW-Wavenet-B'))) ||
+                      langVoices.find(v => v.name.includes('Male') || v.name.includes('男聲'));
+      } else if (this.selectedVoiceGender === 'neutral') {
+        // 中性語音通常沒有明確標註，嘗試找不帶性別關鍵字的語音
+        targetVoice = langVoices.find(v => !v.name.includes('Female') && !v.name.includes('Male') && !v.name.includes('女聲') && !v.name.includes('男聲'));
+      }
+
+      // 如果特定性別找不到，則在目標語言中找任何語音
+      if (!targetVoice && langVoices.length > 0) {
+        console.log(`未找到指定性別的 ${targetLang} 語音，使用第一個找到的 ${targetLang} 語音。`);
+        targetVoice = langVoices[0];
+      }
+
+      // 如果目標語言語音都沒有，退而求其次找英文語音
+      if (!targetVoice) {
+        console.warn('未找到任何繁體中文語音，嘗試使用英文語音。');
+        targetVoice = this.availableVoices.find(v => v.lang.startsWith('en')) || this.availableVoices[0]; // 最後找第一個
+      }
+
+      if (targetVoice) {
+        this.voice = targetVoice;
+        console.log('選定語音:', this.voice.name, '(', this.voice.lang, ')');
+      } else {
+        this.voice = null;
         console.warn('未找到合適的語音，可能語音列表尚未完全載入或瀏覽器無支持語音。');
       }
     },
+
     async sendMessage() {
       if (!this.userPrompt.trim()) {
         alert('請輸入內容！');
@@ -86,7 +132,7 @@ export default {
       this.isLoading = true;
       this.error = null;
       this.aiResponse = '';
-      this.stopSpeaking(); // 發送新訊息前停止當前語音
+      this.stopSpeaking();
 
       this.$emit('update-animation', 'listening');
 
@@ -103,7 +149,6 @@ export default {
 
         this.userPrompt = '';
 
-        // 收到 AI 回應後，立即播放語音
         this.speakResponse();
 
       } catch (error) {
@@ -115,36 +160,39 @@ export default {
         this.isLoading = false;
       }
     },
+    
     speakResponse() {
       if (!this.aiResponse || !this.synth) {
         console.warn('沒有文本或語音合成器不可用。');
         return;
       }
 
-      this.stopSpeaking(); // 確保每次只播放一個語音
+      this.stopSpeaking();
 
       const utterance = new SpeechSynthesisUtterance(this.aiResponse);
 
       if (this.voice) {
         utterance.voice = this.voice;
+        // 如果沒有明確設定，使用選定語音的語言
+        utterance.lang = this.voice.lang; 
       } else {
-        // 如果沒有找到特定語音，可以使用預設語音
-        utterance.lang = 'en-US'; // 預設英文
-        console.warn('使用預設語音 (en-US)。');
+        // 如果沒有找到特定語音，使用預設語言
+        utterance.lang = 'zh-TW'; // 預設繁體中文
+        console.warn('未選定特定語音，使用預設語言 (zh-TW)。');
       }
       
-      utterance.pitch = 1; // 音高 (0 to 2)
-      utterance.rate = 1;  // 語速 (0.1 to 10)
-      utterance.volume = 1; // 音量 (0 to 1)
+      utterance.pitch = 1;
+      utterance.rate = 1;
+      utterance.volume = 1;
 
       utterance.onstart = () => {
         this.isSpeaking = true;
-        this.$emit('update-animation', 'speaking'); // 語音播放時觸發 'speaking' 動畫
+        this.$emit('update-animation', 'speaking');
       };
 
       utterance.onend = () => {
         this.isSpeaking = false;
-        this.$emit('update-animation', 'idle'); // 語音播放結束時觸發 'idle' 動畫
+        this.$emit('update-animation', 'idle');
       };
 
       utterance.onerror = (event) => {
@@ -157,19 +205,18 @@ export default {
     },
     stopSpeaking() {
       if (this.synth && this.synth.speaking) {
-        this.synth.cancel(); // 停止當前正在播放的語音
+        this.synth.cancel();
         this.isSpeaking = false;
         this.$emit('update-animation', 'idle');
       }
     },
-    // onAudioEnded() 方法不再需要
   },
   beforeUnmount() {
-    // 組件銷毀前停止任何正在播放的語音
     this.stopSpeaking();
   }
 };
 </script>
+
 
 <style scoped>
 /* 樣式基本保持不變，新增 .speak-button 樣式 */
